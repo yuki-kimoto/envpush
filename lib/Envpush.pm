@@ -9,10 +9,19 @@ sub startup {
   $self->plugin('INIConfig');
   
   my $r = $self->routes;
+
+  my $start;
+  my $file_check_id;
+  my @commands;
   
-  $r->websocket('/echo' => sub {
-    my $self = shift;
-   
+  $r->websocket('/' => sub {
+  
+    unless ($start++) {
+      $file_check_id = Mojo::IOLoop->recurring(5 => sub {
+        
+      });
+    }
+    
     my $id = sprintf "%s", $self->tx;
     $clients->{$id} = $self->tx;
     
