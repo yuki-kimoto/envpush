@@ -1,3 +1,28 @@
-#/bin/sh
+#!/bin/env perl
 
-touch run.d/$1
+use FindBin;
+use lib "$FindBin::Bin/mojo/lib";
+use Mojo::UserAgent;
+
+my $command = shift;
+
+my $app = Mojo::Server->load_app("$FindBin::Bin/script/envpush");
+
+my $host = $app->config->{server}{host};
+my $port = $app->config->{server}{port};
+
+my $ua = Mojo::UserAgent->new;
+
+$ua->websocket("ws://$host:$port/command" => sub {
+  my ($ua, $tx) = @_;
+  
+  $tx->on(json => sub {
+    my ($tx, $hash) = @_;
+    
+    $tx->finish;
+  });
+  
+  $tx->send({json => {command => $command}});
+});
+
+Mojo::IOLoop->start unless Mojo::IOLoop->is_running;

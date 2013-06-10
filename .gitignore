@@ -16,7 +16,7 @@ MYMETA.yml
 log/*
 !log/.gitignore
 script/hypnotoad.pid
-settings/*
-!settings/.gitignore
+files/*
+!files/.gitignore
 run.d/*
 !run.d/.gitignore
