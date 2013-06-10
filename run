@@ -7,22 +7,25 @@ use Mojo::UserAgent;
 my $command = shift;
 
 my $app = Mojo::Server->load_app("$FindBin::Bin/script/envpush");
-
-my $host = $app->config->{server}{host};
-my $port = $app->config->{server}{port};
+my $port = '3000';
 
 my $ua = Mojo::UserAgent->new;
 
-$ua->websocket("ws://$host:$port/command" => sub {
+$ua->websocket("ws://localhost:$port/task" => sub {
   my ($ua, $tx) = @_;
-  
+
+  unless ($tx->is_websocket) {
+    die "WebSocket handshake failed!";
+    $tx->finish;
+  }
+        
   $tx->on(json => sub {
     my ($tx, $hash) = @_;
     
     $tx->finish;
   });
   
-  $tx->send({json => {command => $command}});
+  $tx->send({json => {type => 'task', command => [$command]}});
 });
 
 Mojo::IOLoop->start unless Mojo::IOLoop->is_running;

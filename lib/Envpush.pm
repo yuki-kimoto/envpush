@@ -1,4 +1,4 @@
-use Envpush;
+package Envpush;
 use Mojo::Base 'Mojolicious';
 use Carp 'croak';
 use Mojo::UserAgent;
@@ -8,14 +8,14 @@ sub startup {
   my $app = $self;
   
   # Config
-  my $config = $self->plugin('INIConfig');
+  my $config = $self->plugin('INIConfig', ext => 'conf');
   
   # Workers is always 1
   my $hypnotoad = $config->{hypnotoad};
   $hypnotoad->{workers} = 1;
   
   # Port
-  my $is_parent = $hypnotoad->{type} eq 'parent';
+  my $is_parent = ($config->{basic}{type} || '') eq 'parent';
 
   if ($is_parent) {
     $hypnotoad->{listen} ||= 'ws://*:10040';
@@ -26,11 +26,6 @@ sub startup {
   
   # Task directory
   my $task_dir = $self->home->rel_dir('task');
-  unless (chdir $task_dir) {
-    my $error = "Can't change directory $task_dir:$!";
-    $app->log->error($error);
-    croak $error;
-  }
 
   my $r = $self->routes;
   
@@ -46,7 +41,7 @@ sub startup {
       my $cid = "$self";
       
       # Resist controller
-      $clients->{$cid} = $self;
+      $childs->{$cid} = $self;
       
       # Receive
       $self->on(json => sub {
@@ -67,7 +62,7 @@ sub startup {
       # Finish
       $self->on('finish' => sub {
         # Remove child
-        delete $clients->{$cid};
+        delete $childs->{$cid};
       });
     });
 
@@ -82,12 +77,11 @@ sub startup {
           $childs->{$cid}->send(json => $hash);
         }
       });
-    );
+    });
   }
   
   # Child
   else {
-    
     # Parent URL
     my $parent_host = $config->{parent}{host};
     croak "[parent]host is empty" unless defined $parent_host;
@@ -98,7 +92,7 @@ sub startup {
 
     # Rsync
     my $rsync
-      = $conf->{child}{rsync} ? $conf->{child}{rsync} : $git->search_bin;
+      = $config->{child}{rsync} ? $config->{child}{rsync} : $self->search_rsync;
     if (!$rsync || ! -e $rsync) {
       $rsync ||= '';
       my $error = "Can't detect or found rsync command ($rsync)."
@@ -106,46 +100,60 @@ sub startup {
       $app->log->error($error);
       croak $error;
     }
-
+    
     # Execute task
     $r->websocket('/task' => sub {
       my $self = shift;
       
-      $self->on(json => sub {
-        my ($tx, $hash) = @_;
-        my ($command, @args) = @{$hash->{command} || []};
-        
-        if ($command =~ /\./) {
-          $app->log->error("Command can't contain dot: $command @args");
-        }
-        else {
-          if (system($command, @args) == 0) {
-            $app->log->info("Success command: $command @args");
+      
+      if (chdir $task_dir) {
+        $self->on(json => sub {
+          my ($tx, $hash) = @_;
+          my ($command, @args) = @{$hash->{command} || []};
+          
+          if ($command =~ /\.\./) {
+            $app->log->error("Command can't contain dot: $command @args");
           }
           else {
-            $app->log->error("Can't execute command: $command @args");
+            if (system("./$command", @args) == 0) {
+              $app->log->info("Success command: $command @args");
+            }
+            else {
+              $app->log->error("Can't execute command: $command @args");
+            }
           }
-        }
-        $self->finish;
-      });
-    );
+          $self->finish;
+        });
+      }
+      else {
+        my $error = "Can't change directory $task_dir:$!";
+        $app->log->error($error);
+      }
+    });
     
     # Sync files
     $r->websocket('/sync' => sub {
-      my $remote_host = $config->{parent}{host};
-      my $ssh_user = $config->{parent}{ssh_user};
-      my $ssh_port = $config->{parent}{ssh_port} || '23';
-      my $parent_files = "$ssh_user@$remote_host:$task_dir";
-      
-      my @cmd = ($rsync, '-e', "ssh -p $ssh_port", '-a', $parent_file, '.');
-      if (system(@cmd) == 0) {
-        $app->log->info("Success rsync command: $command @args");
+
+      if (chdir $task_dir) {
+        my $remote_host = $config->{parent}{host};
+        my $ssh_user = $config->{parent}{ssh_user};
+        my $ssh_port = $config->{parent}{ssh_port} || '23';
+        my $parent_files = "$ssh_user@$remote_host:$task_dir";
+        
+        my @cmd = ($rsync, '-e', "ssh -p $ssh_port", '-a', $parent_files, '');
+        if (system(@cmd) == 0) {
+          $app->log->info("Success rsync command: @cmd");
+        }
+        else {
+          $app->log->error("Can't rsync execute command: @cmd");
+        }
       }
       else {
-        $app->log->error("Can't rsync execute command: $command @args");
+        my $error = "Can't change directory $task_dir:$!";
+        $app->log->error($error);
       }
     });
-        
+    
     # Connect to parent
     my $connect_cb;
     $connect_cb = sub {
@@ -167,7 +175,7 @@ sub startup {
           my ($tx, $hash) = @_;
           
           my $type = $hash->{type};
-          if ($type eq 'task' || $tape eq 'sync') {
+          if ($type eq 'task' || $type eq 'sync') {
             my $ua = Mojo::UserAgent->new;
             
             $ua->websocket("ws://$local_address:$local_port/$type" => sub {
