@@ -28,7 +28,7 @@ sub startup {
   my $task_dir = $self->home->rel_dir('task');
   unless (chdir $task_dir) {
     my $error = "Can't change directory $task_dir:$!";
-    $self->log->error($error);
+    $app->log->error($error);
     croak $error;
   }
 
@@ -87,6 +87,14 @@ sub startup {
   
   # Child
   else {
+    
+    # Parent URL
+    my $parent_host = $config->{parent}{host};
+    croak "[parent]host is empty" unless defined $parent_host;
+    
+    my $parent_url = "ws://$parent_host";
+    my $parent_port = $config->{parent}{port} || '10040';
+    $parent_url .= ":$parent_port";
 
     # Rsync
     my $rsync
@@ -95,58 +103,11 @@ sub startup {
       $rsync ||= '';
       my $error = "Can't detect or found rsync command ($rsync)."
         . " set [child]rsync_path in config file";
-      $self->log->error($error);
+      $app->log->error($error);
       croak $error;
     }
-    
-    my $parent_host = $config->{parent}{host};
-    croak "[parent]host is empty" unless defined $parent_host;
-    
-    my $parent_url = "ws://$parent_host";
-    my $parent_port = $config->{parent}{port} || '10040';
-    $parent_url .= ":$parent_port";
-    
-    # Connect to parent
-    my $ua = Mojo::UserAgent->new;
-    $ua->websocket($parent_url => sub {
-      my ($ua, $tx) = @_;
-      
-      unless ($tx->is_websocket) {
-        my $error = "WebSocket handshake failed!";
-        $self->log->error($error);
-        croak $error;
-      }
-      
-      my $local_address = $tx->local_address;
-      my $local_port = $tx->local_port;
-      
-      $tx->on(json => sub {
-        my ($tx, $hash) = @_;
-        
-        my $type = $hash->{type};
-        my $ua = Mojo::UserAgent->new;
-        
-        $ua->websocket("ws://$local_address:$local_port/$type" => sub {
-          my $self = shift;
 
-          # Receive
-          $self->on(json => sub {
-            my ($tx, $hash) = @_;
-            
-            if (my $message = $hash->{message}) {
-              if ($hash->{error}) {
-                $app->log->error("$message");
-              }
-              else {
-                $app->log->info("$message");
-              }
-            }
-          });
-        });
-      });
-    });
-    
-    # Receive command
+    # Execute task
     $r->websocket('/task' => sub {
       my $self = shift;
       
@@ -169,6 +130,7 @@ sub startup {
       });
     );
     
+    # Sync files
     $r->websocket('/sync' => sub {
       my $remote_host = $config->{parent}{host};
       my $ssh_user = $config->{parent}{ssh_user};
@@ -182,7 +144,55 @@ sub startup {
       else {
         $app->log->error("Can't rsync execute command: $command @args");
       }
-    })
+    });
+        
+    # Connect to parent
+    my $connect_cb;
+    $connect_cb = sub {
+      my $ua = Mojo::UserAgent->new;
+      $ua->websocket($parent_url => sub {
+        my ($ua, $tx) = @_;
+        
+        unless ($tx->is_websocket) {
+          my $error = "WebSocket handshake failed!";
+          $app->log->error($error);
+          Mojo::IOLoop->timer(30 => sub { $connect_cb->() });
+          return;
+        }
+        
+        my $local_address = $tx->local_address;
+        my $local_port = $tx->local_port;
+        
+        $tx->on(json => sub {
+          my ($tx, $hash) = @_;
+          
+          my $type = $hash->{type};
+          if ($type eq 'task' || $tape eq 'sync') {
+            my $ua = Mojo::UserAgent->new;
+            
+            $ua->websocket("ws://$local_address:$local_port/$type" => sub {
+              my $self = shift;
+
+              # Receive
+              $self->on(json => sub {
+                my ($tx, $hash) = @_;
+                
+                if (my $message = $hash->{message}) {
+                  if ($hash->{error}) {
+                    $app->log->error("$message");
+                  }
+                  else {
+                    $app->log->info("$message");
+                  }
+                  $tx->send(json => $hash);
+                }
+              });
+            });
+          }
+        });
+      });
+    };
+    $connect_cb->();
   }
 }
 
